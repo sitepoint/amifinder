@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Return the most recent AWS EC2 AMI match for a given filter"""
+
+# Copyright (C) 2020 SitePoint Pty Ltd
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+# Python Standard Library
+import argparse
+import sys
+from operator import itemgetter
+from os import environ
+
+# 3rd-party libraries:
+import boto3
+from botocore.exceptions import NoCredentialsError
+
+
+def ami_printer(specs, indentation=0):
+    """Print AMI specifications
+
+    The AMI data structure is described here:
+    https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ec2.html#EC2.Client.describe_images
+
+    Effectively it consists of dicts of strings, booleans, or
+    lists. If lists, it's always a list of dicts.
+    """
+    whitespace = ' ' * indentation
+    # Only attributes can be a list.
+    if isinstance(specs, list):
+        for entry in specs:
+            ami_printer(entry, indentation)
+        return
+    # Print the Name first.
+    if 'Name' in specs:
+        print(f"{whitespace}Name: {specs['Name']}")
+    for ami_key, ami_value in [(x, y) for x, y in specs.items()
+                               if x != 'Name']:
+        if not isinstance(ami_value, (dict, list)):
+            print(f'{whitespace}{ami_key}: {ami_value}')
+        else:
+            ami_printer(ami_value, indentation + 2)
+
+
+def get_args():
+    """Get command-line arguments"""
+    parser = argparse.ArgumentParser(
+        description='Fetch the latest AMI of a given type.')
+    for arg in ('name', 'architecture', 'hypervisor', 'ena-support',
+                'state', 'image-type', 'root-device-type',
+                'block-device-mapping.volume-type'):
+        parser.add_argument(f'--{arg}', type=str)
+    parser.add_argument('account', metavar='ACCOUNT',
+                        help='The AWS account ID of the image owner.')
+    return parser.parse_args()
+
+
+def main():
+    """Begin execution"""
+    client = boto3.client('ec2', environ.get('AWS_DEFAULT_REGION',
+                                             'us-west-2'))
+
+    args = get_args()
+    ami_account = args.account
+    ami_filters = []
+
+    for arg_name, arg_value in [(x, y) for x, y in vars(args).items()
+                                if x != 'account']:
+        if arg_value is not None:
+            # AWS wants boolean values to be all lowercase.
+            if arg_value.lower() == 'true':
+                arg_value = arg_value.lower()
+            ami_filters.append({'Name': arg_name.replace('_', '-'),
+                                'Values': arg_value.split(',')})
+    try:
+        response = client.describe_images(
+            Filters=ami_filters,
+            Owners=[ami_account,]
+        )
+    except NoCredentialsError as error:
+        sys.exit(error)
+    try:
+        images_sorted = sorted(response.get('Images', []),
+                               key=itemgetter('CreationDate'),
+                               reverse=True)
+        ami_printer(images_sorted[0])
+    except (KeyError, IndexError):
+        sys.exit("Failed to retrieve any images matching the set filter.")
+
+
+if __name__ == "__main__":
+    main()
